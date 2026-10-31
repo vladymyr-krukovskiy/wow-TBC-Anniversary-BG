@@ -1,0 +1,6 @@
+## Interface: 20505
+## Title: BGWOWClassicStatisticShow
+## SavedVariables: BGWOWClassicStatisticShowDB
+## OptionalDeps: Blizzard_InterfaceOptions
+
+BGWOWClassicStatisticShow.lua
