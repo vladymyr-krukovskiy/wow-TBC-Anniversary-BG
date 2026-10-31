@@ -1,3 +1,5 @@
+local ADDON_NAME = "BGWOWClassicStatisticShow"
+
 local battlegroundDataDefault = {
   killingBlows = 0,
   honorableKills = 0,
@@ -37,20 +39,21 @@ local function IsFrameTemplateValid(templateName)
 end
 
 -- Saved settings with defaults.
-BGWOWClassicStatisticShowDB = BGWOWClassicStatisticShowDB or {
-  frameTemplate = DEFAULT_FRAME_TEMPLATE,
-  frameScale = DEFAULT_FRAME_SCALE,
-  showOutsideBG = true
-}
-if not IsFrameTemplateValid(BGWOWClassicStatisticShowDB.frameTemplate) then
-  BGWOWClassicStatisticShowDB.frameTemplate = DEFAULT_FRAME_TEMPLATE
+-- Must run after SavedVariables are loaded (PLAYER_LOGIN), not at file load.
+local function InitDB()
+  BGWOWClassicStatisticShowDB = BGWOWClassicStatisticShowDB or {}
+  local db = BGWOWClassicStatisticShowDB
+  if not IsFrameTemplateValid(db.frameTemplate) then
+    db.frameTemplate = DEFAULT_FRAME_TEMPLATE
+  end
+  if db.frameScale == nil then
+    db.frameScale = DEFAULT_FRAME_SCALE
+  end
+  if db.showOutsideBG == nil then
+    db.showOutsideBG = true
+  end
 end
-if BGWOWClassicStatisticShowDB.frameScale == nil then
-  BGWOWClassicStatisticShowDB.frameScale = DEFAULT_FRAME_SCALE
-end
-if BGWOWClassicStatisticShowDB.showOutsideBG == nil then
-  BGWOWClassicStatisticShowDB.showOutsideBG = true
-end
+
 local templateFrame = nil
 local header = nil
 local factionIcon = nil
@@ -132,8 +135,6 @@ local function CreateTable(parent)
       local cell = CreateFrame("Frame", nil, parent)
       cell:SetSize(columnWidth, rowHeight)
       cell:SetPoint("CENTER", parent, "CENTER", (j - 1) * columnWidth - 90, startY - i * rowHeight + 5)
-      cell.bg = cell:CreateTexture(nil, "BACKGROUND")
-      cell.bg:SetAllPoints()
       -- Cell text.
       local cellText = cell:CreateFontString(nil, "OVERLAY", "GameFontNormal")
       cellText:SetPoint("CENTER")
@@ -200,14 +201,43 @@ local function ApplyFrameScale()
   templateFrame:SetScale(BGWOWClassicStatisticShowDB.frameScale or DEFAULT_FRAME_SCALE)
 end
 
+-- Restore saved frame position (relative to UIParent).
+local function ApplyFramePosition()
+  if not templateFrame then
+    return
+  end
+  local pos = BGWOWClassicStatisticShowDB.position
+  if not pos then
+    return
+  end
+  templateFrame:ClearAllPoints()
+  templateFrame:SetPoint(pos.point, UIParent, pos.relativePoint, pos.x, pos.y)
+end
+
+-- Remember frame position after dragging.
+local function SaveFramePosition(frame)
+  local point, _, relativePoint, x, y = frame:GetPoint(1)
+  BGWOWClassicStatisticShowDB.position = {
+    point = point,
+    relativePoint = relativePoint,
+    x = x,
+    y = y
+  }
+end
+
+local function HasOptionsAPI()
+  return (Settings and Settings.RegisterCanvasLayoutCategory and Settings.RegisterAddOnCategory)
+    or InterfaceOptions_AddCategory
+end
+
 -- Create settings UI (TBC Settings API or legacy interface).
 local function CreateOptionsPanel()
-  if optionsPanelCreated then
+  if optionsPanelCreated or not HasOptionsAPI() then
     return
   end
   optionsPanelCreated = true
   local panel = CreateFrame("Frame", "BGWOWClassicStatisticShowOptions", UIParent)
-  panel.name = "BGWOWClassicStatisticShow"
+  panel.name = ADDON_NAME
 
   panel:SetScript("OnShow", function(self)
     if self.initialized then
@@ -217,7 +247,7 @@ local function CreateOptionsPanel()
 
     local title = self:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
     title:SetPoint("TOPLEFT", 16, -16)
-    title:SetText("BGWOWClassicStatisticShow")
+    title:SetText(ADDON_NAME)
 
     local templateLabel = self:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
     templateLabel:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -12)
@@ -273,17 +303,12 @@ local function CreateOptionsPanel()
 
   -- Register settings category in the appropriate UI system.
   if Settings and Settings.RegisterCanvasLayoutCategory and Settings.RegisterAddOnCategory then
-    local category = Settings.RegisterCanvasLayoutCategory(panel, "BGWOWClassicStatisticShow")
+    local category = Settings.RegisterCanvasLayoutCategory(panel, ADDON_NAME)
     Settings.RegisterAddOnCategory(category)
   elseif InterfaceOptions_AddCategory then
     InterfaceOptions_AddCategory(panel)
   end
 end
- 
--- Update faction icon on zone load.
-local eventFrame = CreateFrame("Frame")
-eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
-eventFrame:SetScript("OnEvent", UpdateFactionIcon)
 
 -- Register a list of events on a frame.
 local function registerEvents(frame, events)
@@ -298,51 +323,34 @@ local function setEventListeners(frame, callback)
 end
 
 local EVENTS = {
-  'PVP_RATED_STATS_UPDATE',
-  'UPDATE_BATTLEFIELD_SCORE',
-  'PVP_WORLDSTATE_UPDATE',
+  'UPDATE_BATTLEFIELD_SCORE', -- Scoreboard data arrived
   'ZONE_CHANGED_NEW_AREA',
-  'ZONE_CHANGED',
-  'PLAYER_ENTERING_WORLD',
-  'UPDATE_BATTLEFIELD_STATUS',
-  'PLAYER_LOGIN',
-  'PLAYER_LOGOUT', -- Fired when about to log out
-  'ADDON_LOADED'   -- Fired when saved variables are loaded
+  'PLAYER_ENTERING_WORLD'
 }
 
 -- Main event handler for updating scores and visibility.
-local function onEvent(self, event, unit, ...)
-  if
-      (event == 'PVP_RATED_STATS_UPDATE'
-        or event == 'HONOR_LEVEL_UPDATE'
-        or event == 'UPDATE_BATTLEFIELD_SCORE'
-        or event == 'ZONE_CHANGED_NEW_AREA'
-        or event == 'ZONE_CHANGED'
-        or event == 'PLAYER_ENTERING_WORLD')
-  then
-    if event == 'PLAYER_ENTERING_WORLD' then
-      local _, instanceType = IsInInstance()
-      if instanceType == "pvp" then
-        StartScoreTicker()
-      else
-        StopScoreTicker()
-      end
+local function onEvent(self, event, ...)
+  if event == 'PLAYER_ENTERING_WORLD' then
+    local _, instanceType = IsInInstance()
+    if instanceType == "pvp" then
+      StartScoreTicker()
+    else
+      StopScoreTicker()
     end
-    UpdateFrameVisibility()
-
-    if event ~= 'UPDATE_BATTLEFIELD_SCORE' then
-      RequestBattlefieldScoreData()
-    end
-
-    getPlayerData();
+    UpdateFactionIcon()
   end
+  UpdateFrameVisibility()
+
+  if event ~= 'UPDATE_BATTLEFIELD_SCORE' then
+    RequestBattlefieldScoreData()
+  end
+
+  getPlayerData();
 end
 
 -- Rebuild the UI when the template changes.
 BuildUI = function()
-  local anchorPoint, relativeTo, relativePoint, xOfs, yOfs
   if templateFrame then
-    anchorPoint, relativeTo, relativePoint, xOfs, yOfs = templateFrame:GetPoint(1)
     templateFrame:UnregisterAllEvents()
     templateFrame:Hide()
   end
@@ -354,19 +362,19 @@ BuildUI = function()
     BGWOWClassicStatisticShowDB.frameTemplate
   )
   templateFrame:Hide()
-
-  if anchorPoint then
-    templateFrame:ClearAllPoints()
-    templateFrame:SetPoint(anchorPoint, relativeTo or UIParent, relativePoint or anchorPoint, xOfs or 0, yOfs or 0)
-  end
+  ApplyFramePosition()
 
   templateFrame:SetMovable(true)
+  templateFrame:SetClampedToScreen(true)
   templateFrame:EnableMouse(true)
   templateFrame:RegisterForDrag("LeftButton")
   templateFrame:SetScript("OnDragStart", templateFrame.StartMoving)
-  templateFrame:SetScript("OnDragStop", templateFrame.StopMovingOrSizing)
+  templateFrame:SetScript("OnDragStop", function(self)
+    self:StopMovingOrSizing()
+    SaveFramePosition(self)
+  end)
 
-  playerName = GetUnitName('player', showServerName)
+  playerName = GetUnitName('player')
   local _, resolvedClass = UnitClass("player")
   playerClass = resolvedClass
   local classColor = RAID_CLASS_COLORS[playerClass]
@@ -400,31 +408,26 @@ BuildUI = function()
   CreateTable(templateFrame)
   UpdateFactionIcon()
   UpdateFrameVisibility()
+  getPlayerData()
 
   registerEvents(templateFrame, EVENTS)
   setEventListeners(templateFrame, onEvent)
 end
 
--- Initialize UI and register settings.
-BuildUI()
-if Settings and Settings.RegisterAddOnCategory then
-  CreateOptionsPanel()
-elseif InterfaceOptions_AddCategory then
-  CreateOptionsPanel()
-else
-  local optionsLoader = CreateFrame("Frame")
-  optionsLoader:RegisterEvent("ADDON_LOADED")
-  optionsLoader:SetScript("OnEvent", function(_, _, addonName)
-    if addonName == "Blizzard_InterfaceOptions" then
+-- Initialize after SavedVariables are loaded and player info is available.
+local loader = CreateFrame("Frame")
+loader:RegisterEvent("PLAYER_LOGIN")
+loader:RegisterEvent("ADDON_LOADED")
+loader:SetScript("OnEvent", function(self, event, addonName)
+  if event == "PLAYER_LOGIN" then
+    InitDB()
+    BuildUI()
+    CreateOptionsPanel()
+    self:UnregisterEvent("PLAYER_LOGIN")
+  elseif event == "ADDON_LOADED" and addonName == "Blizzard_InterfaceOptions" then
+    -- Legacy clients may load the options UI on demand.
+    if BGWOWClassicStatisticShowDB then
       CreateOptionsPanel()
-      optionsLoader:UnregisterEvent("ADDON_LOADED")
     end
-  end)
-end
--- Fallback panel registration on login.
-local fallbackOptions = CreateFrame("Frame")
-fallbackOptions:RegisterEvent("PLAYER_LOGIN")
-fallbackOptions:SetScript("OnEvent", function()
-  CreateOptionsPanel()
-  fallbackOptions:UnregisterEvent("PLAYER_LOGIN")
+  end
 end)
